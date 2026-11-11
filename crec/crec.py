@@ -1,10 +1,10 @@
+# Modified for the recorder-only fork: removed unused processing hooks.
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import Callable
 
 from .models import Observation, init_db
 from .observers import Observer
@@ -44,7 +44,6 @@ class crec:
         self._update_sem = asyncio.Semaphore(max_concurrent_updates)
         self._tasks: set[asyncio.Task] = set()
         self._loop_task: asyncio.Task | None = None
-        self.update_handlers: list[Callable[[Observer, Update], None]] = []
 
     def start_update_loop(self):
         if self._loop_task is None:
@@ -81,6 +80,9 @@ class crec:
         for obs in self.observers:
             await obs.stop()
 
+        if self.engine is not None:
+            await self.engine.dispose()
+
     async def _update_loop(self):
         """
         Efficiently wait for *any* observer to produce an Update and
@@ -112,9 +114,6 @@ class crec:
             finally:
                 self._tasks.discard(asyncio.current_task())
 
-    async def _handle_audit(self, obs: Observation) -> bool:
-        return False
-
     async def _default_handler(self, observer: Observer, update: Update) -> None:
         self.logger.info(f"Processing update from {observer.name}")
         self.logger.info(f"Content ({update.content_type}): {update.content[:10]}")
@@ -125,9 +124,6 @@ class crec:
                 content=update.content,
                 content_type=update.content_type,
             )
-
-            if await self._handle_audit(observation):
-                return
 
             session.add(observation)
             await session.flush()
@@ -144,6 +140,3 @@ class crec:
     def remove_observer(self, observer: Observer):
         if observer in self.observers:
             self.observers.remove(observer)
-
-    def register_update_handler(self, fn: Callable[[Observer, Update], None]):
-        self.update_handlers.append(fn)

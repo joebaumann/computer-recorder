@@ -1,4 +1,17 @@
-**/__pycache__/**
-**/*.egg-info
-**/.DS_Store
-**/.vscode/
+# Modified for the recorder-only fork: exclude local environments and recordings.
+__pycache__/
+*.py[cod]
+*.egg-info/
+.DS_Store
+.vscode/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.env
+records/
+*.db
+*.db-wal
+*.db-shm
+*.zip

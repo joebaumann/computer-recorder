@@ -1,21 +1,19 @@
+# Modified for the recorder-only fork: removed unused AI and cloud upload code.
 from __future__ import annotations
 ###############################################################################
 # Imports                                                                     #
 ###############################################################################
 
 # — Standard library —
-import base64
 import gc
 import logging
 import os
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from importlib.resources import files as get_package_file
 from typing import Any, Dict, Iterable, List, Optional
 
 import asyncio
-from functools import partial
 
 # — Third-party —
 import mss
@@ -28,100 +26,6 @@ from shapely.ops import unary_union
 # — Local —
 from .observer import Observer
 from ..schemas import Update
-
-# — OpenAI async client —
-# from openai import AsyncOpenAI
-# client = AsyncOpenAI()
-
-# — Google Drive —
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-
-def initialize_google_drive(client_secrets_path: str = None) -> GoogleDrive:
-    """
-    Initialize Google Drive authentication with optional custom client_secrets.json path.
-    
-    Parameters
-    ----------
-    client_secrets_path : str, optional
-        Path to the client_secrets.json file. If None, uses default location.
-        
-    Returns
-    -------
-    GoogleDrive
-        Authenticated Google Drive client
-    """
-    gauth = GoogleAuth()
-    
-    if client_secrets_path:
-        # Expand user path and get absolute path
-        client_secrets_path = os.path.abspath(os.path.expanduser(client_secrets_path))
-        
-        # Verify the file exists
-        if not os.path.exists(client_secrets_path):
-            raise FileNotFoundError(f"Client secrets file not found: {client_secrets_path}")
-        
-        # Copy the client_secrets.json to current directory temporarily
-        import shutil
-        temp_client_secrets = "client_secrets.json"
-        
-        try:
-            shutil.copy2(client_secrets_path, temp_client_secrets)
-            print(f"✅ Copied client_secrets.json to current directory")
-            
-            # Use default behavior (PyDrive will find client_secrets.json in current directory)
-            gauth.LocalWebserverAuth()  # Opens browser for first-time authentication
-            
-        finally:
-            # Clean up temporary file
-            try:
-                os.remove(temp_client_secrets)
-                print(f"✅ Cleaned up temporary client_secrets.json")
-            except OSError:
-                pass  # File might already be deleted
-    else:
-        # Use default behavior (looks for client_secrets.json in current directory)
-        gauth.LocalWebserverAuth()  # Opens browser for first-time authentication
-    
-    return GoogleDrive(gauth)
-
-# Initialize with default behavior (looks for client_secrets.json in current directory)
-# drive = initialize_google_drive()
-
-def list_folders(drive: GoogleDrive):
-    """List all folders in Google Drive to help find folder IDs"""
-    folders = drive.ListFile({'q': "mimeType='application/vnd.google-apps.folder' and trashed=false"}).GetList()
-    print("Available folders:")
-    for folder in folders:
-        print(f"Name: {folder['title']}, ID: {folder['id']}")
-    return folders
-
-def find_folder_by_name(folder_name: str, drive: GoogleDrive):
-    """Find a folder by name and return its ID"""
-    folders = drive.ListFile({'q': f"mimeType='application/vnd.google-apps.folder' and title='{folder_name}' and trashed=false"}).GetList()
-    if folders:
-        return folders[0]['id']
-    return None
-
-def upload_file(path: str, drive_dir: str, drive_instance: GoogleDrive):
-    """Upload a file to Google Drive and delete the local file.
-    
-    Parameters
-    ----------
-    path : str
-        Path to the file to upload
-    drive_dir : str
-        Google Drive folder ID to upload to
-    drive_instance : GoogleDrive
-        Google Drive client instance.
-    """
-    upload_file = drive_instance.CreateFile({
-        'title': path.split('/')[-1],
-        'parents': [{'id': drive_dir}]
-    })
-    upload_file.SetContentFile(path)
-    upload_file.Upload()
-    os.remove(path)
 
 ###############################################################################
 # Window‑geometry helpers                                                     #
@@ -212,9 +116,9 @@ def _is_app_visible(names: Iterable[str]) -> bool:
 class Screen(Observer):
     """
     Capture before/after screenshots around user interactions.
-    Blocking work (Quartz, mss, Pillow, OpenAI Vision) is executed in
+    Blocking work (Quartz, mss, Pillow) is executed in
     background threads via `asyncio.to_thread`.
-    
+
     Keyboard events are optimized to save disk space:
     - Only the first and last screenshots are kept for consecutive key presses
     - Intermediate screenshots are automatically deleted
@@ -227,7 +131,7 @@ class Screen(Observer):
     _MON_START: int = 1     # first real display in mss
     _MEMORY_CLEANUP_INTERVAL: int = 30  # Force GC every 30 frames instead of 50
     _MAX_WORKERS: int = 4  # Limit thread pool size to prevent exhaustion
-    
+
     # Scroll filtering constants
     _SCROLL_DEBOUNCE_SEC: float = 0.8  # Minimum time between scroll events
     _SCROLL_MIN_DISTANCE: float = 8.0  # Minimum scroll distance to log
@@ -242,8 +146,6 @@ class Screen(Observer):
         history_k: int = 10,
         debug: bool = False,
         keyboard_timeout: float = 2.0,
-        gdrive_dir: str = "screenshots",
-        client_secrets_path: str = "~/Desktop/client_secrets.json",
         scroll_debounce_sec: float = 0.5,
         scroll_min_distance: float = 5.0,
         scroll_max_frequency: int = 10,
@@ -287,10 +189,6 @@ class Screen(Observer):
         self._scroll_event_count: int = 0
         self._scroll_lock = asyncio.Lock()
 
-        # Initialize Google Drive with custom client_secrets path if provided
-        # self.drive = initialize_google_drive(client_secrets_path)
-        # self.gdrive_dir = find_folder_by_name(gdrive_dir, self.drive)
-
         # call parent
         super().__init__()
 
@@ -328,13 +226,13 @@ class Screen(Observer):
     def _should_log_scroll(self, x: float, y: float, dx: float, dy: float) -> bool:
         """
         Determine if a scroll event should be logged based on filtering criteria.
-        
+
         Returns True if the scroll event should be logged, False otherwise.
         """
         current_time = time.time()
-        
+
         # Check if this is a new scroll session
-        if (self._scroll_session_start is None or 
+        if (self._scroll_session_start is None or
             current_time - self._scroll_session_start > self._scroll_session_timeout):
             # Start new session
             self._scroll_session_start = current_time
@@ -342,19 +240,19 @@ class Screen(Observer):
             self._scroll_last_position = (x, y)
             self._scroll_last_time = current_time
             return True
-        
+
         # Check debounce time
-        if (self._scroll_last_time is not None and 
+        if (self._scroll_last_time is not None and
             current_time - self._scroll_last_time < self._scroll_debounce_sec):
             return False
-        
+
         # Check minimum distance
         if self._scroll_last_position is not None:
-            distance = ((x - self._scroll_last_position[0]) ** 2 + 
+            distance = ((x - self._scroll_last_position[0]) ** 2 +
                        (y - self._scroll_last_position[1]) ** 2) ** 0.5
             if distance < self._scroll_min_distance:
                 return False
-        
+
         # Check frequency limit
         self._scroll_event_count += 1
         session_duration = current_time - self._scroll_session_start
@@ -362,22 +260,22 @@ class Screen(Observer):
             frequency = self._scroll_event_count / session_duration
             if frequency > self._scroll_max_frequency:
                 return False
-        
+
         # Update tracking state
         self._scroll_last_position = (x, y)
         self._scroll_last_time = current_time
-        
+
         return True
 
     async def _cleanup_key_screenshots(self) -> None:
         """Clean up intermediate keyboard screenshots, keeping only first and last."""
         if len(self._key_screenshots) <= 2:
             return
-        
+
         # Keep first and last, delete the rest
         to_delete = self._key_screenshots[1:-1]
         self._key_screenshots = [self._key_screenshots[0], self._key_screenshots[-1]]
-        
+
         for path in to_delete:
             try:
                 await self._run_in_thread(os.remove, path)
@@ -397,7 +295,7 @@ class Screen(Observer):
         x1, x2 = max(0, x - 30), min(frame.width, x + 30)
         y1, y2 = max(0, y - 20), min(frame.height, y + 20)
         draw.rectangle([x1, y1, x2, y2], outline=box_color, width=box_width)
-        
+
         # Save with lower quality to reduce memory usage
         await self._run_in_thread(
             image.save,
@@ -406,18 +304,15 @@ class Screen(Observer):
             quality=70,  # Reduced from 90 to 70
             optimize=True,  # Enable optimization
         )
-        
+
         # Explicitly delete image objects to free memory
         del draw
         del image
-        
-        # upload to google drive and delete local file
-        # if self.gdrive_dir is not None:
-        #     await asyncio.to_thread(upload_file, path, self.gdrive_dir, self.drive)
+
         return path
 
     async def _process_and_emit(
-        self, before_path: str, after_path: str | None, 
+        self, before_path: str, after_path: str | None,
         action: str | None, ev: dict | None,
     ) -> None:
         if "scroll" in action:
@@ -435,17 +330,17 @@ class Screen(Observer):
     async def stop(self) -> None:
         """Stop the observer and clean up resources."""
         await super().stop()
-        
+
         # Clean up frame objects
         async with self._frame_lock:
             for frame in self._frames.values():
                 if frame is not None:
                     del frame
             self._frames.clear()
-        
+
         # Force garbage collection
         await self._run_in_thread(gc.collect)
-        
+
         # Shutdown thread pool
         if hasattr(self, '_thread_pool'):
             self._thread_pool.shutdown(wait=True)
@@ -519,7 +414,7 @@ class Screen(Observer):
                     step = f"scroll({ev['position'][0]:.1f}, {ev['position'][1]:.1f}, dx={scroll_info[0]:.2f}, dy={scroll_info[1]:.2f})"
                 else:
                     step = f"{ev['type']}({ev['position'][0]:.1f}, {ev['position'][1]:.1f})"
-                
+
                 bef_path = await self._save_frame(ev["before"], ev["position"][0], ev["position"][1], f"{step}_before")
                 aft_path = await self._save_frame(aft, ev["position"][0], ev["position"][1], f"{step}_after")
                 await self._process_and_emit(bef_path, aft_path, ev["type"], ev)
@@ -538,22 +433,22 @@ class Screen(Observer):
                 idx = self._mon_for(x, y, mons)
                 if idx is None:
                     return
-                    
+
                 mon = mons[idx - self._MON_START]
                 x = x - mon["left"]
                 y = y - mon["top"]
                 log.info(f"Key {typ}: {str(key)} on monitor {idx}")
-                
+
                 step = f"key_{typ}({str(key)})"
                 await self.update_queue.put(
                     Update(content=step, content_type="input_text")
                 )
-                
+
                 async with self._key_activity_lock:
                     current_time = time.time()
-                    
+
                     # Check if this is the start of a new keyboard session
-                    if (self._key_activity_start is None or 
+                    if (self._key_activity_start is None or
                         current_time - self._key_activity_start > self._key_activity_timeout):
                         # Start new session - save first screenshot
                         self._key_activity_start = current_time
@@ -566,7 +461,7 @@ class Screen(Observer):
                         screenshot_path = await self._save_frame(self._frames[idx], x, y, f"{step}_intermediate")
                         self._key_screenshots.append(screenshot_path)
                         log.info(f"Continued keyboard session, saved intermediate screenshot: {screenshot_path}")
-                    
+
                     # Schedule cleanup of previous intermediate screenshots
                     if len(self._key_screenshots) > 2:
                         asyncio.create_task(self._cleanup_key_screenshots())
@@ -579,24 +474,24 @@ class Screen(Observer):
                         if self.debug:
                             log.info(f"Scroll filtered out: dx={dx:.2f}, dy={dy:.2f}")
                         return
-                
+
                 idx = self._mon_for(x, y, mons)
                 if idx is None:
                     return
-                    
+
                 mon = mons[idx - self._MON_START]
                 x = x - mon["left"]
                 y = y - mon["top"]
-                
+
                 # Only log significant scroll movements
                 scroll_magnitude = (dx**2 + dy**2)**0.5
                 if scroll_magnitude < 1.0:  # Very small scrolls
                     if self.debug:
                         log.info(f"Scroll too small: magnitude={scroll_magnitude:.2f}")
                     return
-                
+
                 log.info(f"Scroll @({x:7.1f},{y:7.1f}) dx={dx:.2f} dy={dy:.2f} → mon={idx}")
-                
+
                 if self._skip():
                     return
 
@@ -605,7 +500,7 @@ class Screen(Observer):
                     if bf is None:
                         return
                     self._pending_event = {"type": "scroll", "position": (x, y), "mon": idx, "before": bf, "scroll": (dx, dy)}
-                
+
                 # Process event immediately
                 await flush()
 
@@ -626,7 +521,7 @@ class Screen(Observer):
                     if bf is None:
                         return
                     self._pending_event = {"type": typ, "position": (x, y), "mon": idx, "before": bf}
-                
+
                 # Process event immediately instead of using debounce
                 await flush()
 
@@ -643,7 +538,7 @@ class Screen(Observer):
                     old_frame = None
                     async with self._frame_lock:
                         old_frame = self._frames.get(idx)
-                    
+
                     # Capture new frame using custom thread pool
                     try:
                         frame = await self._run_in_thread(sct.grab, m)
@@ -651,23 +546,23 @@ class Screen(Observer):
                         if self.debug:
                             logging.getLogger("Screen").error(f"Failed to capture frame: {e}")
                         continue
-                    
+
                     async with self._frame_lock:
                         self._frames[idx] = frame
-                    
+
                     # Explicitly delete old frame to free memory
                     if old_frame is not None:
                         del old_frame
-                    
+
                     frame_count += 1
-                    
+
                     # Force garbage collection every 30 frames to prevent memory buildup
                     if frame_count % self._MEMORY_CLEANUP_INTERVAL == 0:
                         await self._run_in_thread(gc.collect)
 
                 # Check for keyboard session timeout
                 current_time = time.time()
-                if (self._key_activity_start is not None and 
+                if (self._key_activity_start is not None and
                     current_time - self._key_activity_start > self._key_activity_timeout and
                     len(self._key_screenshots) > 1):
                     # Session ended - rename last screenshot to indicate it's the final one
@@ -691,7 +586,7 @@ class Screen(Observer):
             # shutdown
             mouse_listener.stop()
             key_listener.stop()
-            
+
             # Final cleanup of any remaining keyboard session
             if self._key_activity_start is not None and len(self._key_screenshots) > 1:
                 async with self._key_activity_lock:
@@ -703,6 +598,6 @@ class Screen(Observer):
                     except OSError:
                         pass
                     await self._cleanup_key_screenshots()
-            
+
             # if self._debounce_handle:
             #     self._debounce_handle.cancel()

@@ -1,102 +1,116 @@
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="./assets/logo.jpg">
-  <source media="(prefers-color-scheme: light)" srcset="./assets/logo.jpg">
-  <img alt="Shows the logo of the toolkit." src="./assets/logo.jpg"  width="80%">
-</picture>
-</p>
+# Computer Recorder
 
-# Workflow Induction Toolkit
+Record computer activity locally for a study, then share the recording with the
+research team. The recorder saves **screenshots and mouse/keyboard events**,
+including typed keys. It does not produce a continuous video or record audio.
 
-We induce interpretable, structured workflows from either human or agent computer-use activities, usually consisting heterogeneous low-level actions.
-Download apps for
-[![macOS](https://img.shields.io/badge/macOS-Download-A2AAAD?logo=apple&logoColor=white&style=flat)](https://drive.google.com/drive/folders/11AqZD9enkH8g9uCHK5NAd2Fxu0m36rfl?usp=sharing)
-and
-[![Windows](https://img.shields.io/badge/Windows-Download-457b9d?logo=windows&logoColor=white&style=flat)](https://drive.google.com/drive/folders/1tq5VLQuvmxJesg0Otj2Jq5iQbN5ZQSDY?usp=drive_link)
-to start!
+This recorder-only fork is adapted from the
+[Workflow Induction Toolkit (WIT)](https://github.com/zorazrw/workflow-induction-toolkit).
+The original full repository is preserved on
+[`archive/full-workflow-induction-toolkit`](https://github.com/joebaumann/computer-recorder/tree/archive/full-workflow-induction-toolkit).
+The `main` branch contains the recorder and its dependencies, without workflow
+induction or AI processing. No API key or cloud account is needed to record.
 
-Read our paper: "*How AI Agents Do Human Work? Comparing AI and Human Workflows Across Diverse Occupations*" [:link:](https://arxiv.org/abs/2510.22780)
+## 1. Install
 
-## Quick Start 🚀
+Requirements: **macOS**, **Python 3.10 or newer**, and **Git**. The source recorder
+uses Apple's Quartz framework; Windows and Linux are not supported.
+
+Open Terminal and run:
 
 ```bash
-bash induce_workflow.sh ${DATA_DIR}
-```
-Find workflow step descriptions in `${DATA_DIR}/workflow.txt` and detailed data in `${DATA_DIR}/workflow.json`.
-
-## ① Installation
-```bash
-git clone https://github.com/zorazrw/workflow-induction-toolkit
-cd workflow-induction-toolkit
-export OPENAI_API_KEY=${YOUR_API_KEY}
-```
-
-## ② Record Human Computer-Use Activities
-
-Install the recording tool:
-```bash
+git clone --depth 1 --single-branch --branch main https://github.com/joebaumann/computer-recorder.git
 cd computer-recorder
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
 ```
 
-Enable recording permission on your Mac: go to System Preferences $\rightarrow$ Privacy & Security $\rightarrow$ Accessibility, allow recording for the app that you use to edit the code, e.g., VSCode.
-Then follow the [instructions](computer-recorder/instructions.pdf) to configure the system settings.
+The shallow clone downloads the current recorder version without the old toolkit
+history. If you already cloned the repository, enter its folder and follow the
+environment creation and installation commands above.
 
-Run the recording tool by simply running:
-```bash
-crec   # Press `Ctrl+C` to stop the recording.
-```
+## 2. Allow recording
 
-## ③ Induce Human Workflows
+In **System Settings → Privacy & Security**, allow the app that runs the recorder
+(for example, Terminal, iTerm, or VS Code) to use:
 
-```bash
-cd workflow-induction
-pip install -r requirements.txt
-```
+- **Screen Recording** (or **Screen & System Audio Recording**, depending on macOS).
+- **Accessibility**, for mouse and keyboard events.
+- **Input Monitoring**, if macOS requests it.
 
-To parse a human trajectory, we first need to merge duplicate actions:
-```bash
-python get_human_trajectory.py --data_dir <data_dir>
-```
-where `data_dir` should be directory containing the `records`, e.g., `~/Downloads/` by default.
+Restart that app if macOS asks you to, then return to the repository and run
+`source .venv/bin/activate` again.
 
-You can also preprocess agent trajectories into a similar format, `get_agent_trajectory.py` provides an example for OpenHands agents (run `python get_agent_trajectory.py --data_dir <data_dir>`).
+## 3. Record your study session
 
-Then, segment the trajectory based on state transitions:
-```bash
-python segment.py --data_dir <data_dir>
-```
-
-Lastly, perform semantic-based segment merging:
-```bash
-python induce.py --data_dir <data_dir> --auto
-```
-where `--auto` is used to automatically iterate and terminate workflow induction.
-
-The workflow will be saved in the `{data_dir}/workflow.json` as a JSON file.
-The high-level step description will be saved in the `{data_dir}/workflow.txt` as plain texts.
-
-### Real-time Induction
-
-You can also induce workflows in real-time while recording. After launching the recording tool, run:
+Close unrelated windows and avoid entering passwords or other private information
+while recording: screenshots and typed keys are captured locally.
 
 ```bash
-python induce_real_time.py --data_dir <data_dir>
+crec
 ```
 
-You will see real-time workflow updates in the console.
+Keep Terminal open while you perform the study task. To stop, return to Terminal,
+press **Ctrl+C**, and wait for the command to finish.
 
-## Acknowledgement
+The files are saved to:
 
-Please cite our paper if you find this toolkit useful in your research:
-
-```bibtex
-@inproceedings{howai2025wang,
-  title = {How AI Agents Do Human Work? Comparing AI and Human Workflows Across Diverse Occupations},
-  author = {Wang, Zora Zhiruo and Shao, Yijia and Shaikh, Omar and Fried, Daniel and Neubig, Graham and Yang, Diyi},
-  journal={arXiv preprint arXiv:2510.22780},
-  year = {2025},
-}
+```text
+~/Downloads/records/
+├── actions.db       # Mouse and keyboard event log
+└── screenshots/     # JPEG screenshots around interactions
 ```
 
-The recording tool is modified based on [GUM](https://github.com/generalusermodels/gum).
+Do a short trial before the study: click and type in a test window, stop recording,
+and check that `screenshots/` contains readable images and `actions.db` exists.
+Move or rename the trial's `records` folder before starting the actual study.
+Each run uses the same output folder, so also move or rename earlier recordings
+before starting another session.
+
+## 4. Share the recording
+
+After the recorder has stopped:
+
+1. Open **Finder → Downloads** and locate `records`.
+2. Right-click the entire `records` folder and choose **Compress “records”**.
+3. Rename the ZIP using the participant/session identifier supplied by the study
+   team, then send it using the team's designated upload link or sharing method.
+
+Share the whole folder, including `actions.db`, `screenshots/`, and any other files
+inside it. Nothing is uploaded automatically. Keep the local copy until the study
+team confirms receipt. Do not commit recordings to this repository.
+
+## Options and troubleshooting
+
+Run `crec --help` to see the available options. `python -m crec` runs the same
+recorder. If `crec` is not found, activate `.venv` from the repository folder again.
+If screenshots are blank or events are missing, check the permissions above and
+restart the app running the recorder.
+
+Optional scroll filtering settings:
+
+```bash
+crec --scroll-debounce 0.5 \
+     --scroll-min-distance 5.0 \
+     --scroll-max-frequency 10 \
+     --scroll-session-timeout 2.0
+```
+
+These are the defaults. They control the minimum time between scroll events,
+minimum pointer movement between logged scrolls, maximum event frequency, and
+scroll session timeout. Use the defaults unless the study team instructs otherwise.
+
+## Attribution and license
+
+This fork modifies WIT's packaging, documentation, and recorder support code to
+provide standalone local recording. WIT's recording tool was itself modified from
+[GUM](https://github.com/generalusermodels/gum). The original
+[Apache 2.0 license](LICENSE) is retained.
+
+Original WIT research:
+
+> Wang, Zora Zhiruo; Shao, Yijia; Shaikh, Omar; Fried, Daniel; Neubig, Graham;
+> and Yang, Diyi. *How AI Agents Do Human Work? Comparing AI and Human Workflows
+> Across Diverse Occupations* (2025).
+> [arXiv:2510.22780](https://arxiv.org/abs/2510.22780).
