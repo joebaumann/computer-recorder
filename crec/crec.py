@@ -70,15 +70,19 @@ class crec:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        # Finish screenshots and their associated events while the sink is
+        # still running. Otherwise the final interaction can be discarded.
+        for obs in self.observers:
+            await obs.stop()
         await self.stop_update_loop()
 
         # wait for any in-flight handlers
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        # stop observers
         for obs in self.observers:
-            await obs.stop()
+            while not obs.update_queue.empty():
+                await self._default_handler(obs, obs.update_queue.get_nowait())
 
         if self.engine is not None:
             await self.engine.dispose()
@@ -88,23 +92,25 @@ class crec:
         Efficiently wait for *any* observer to produce an Update and
         dispatch it through the semaphore-guarded handler.
         """
-        while True:
-
-            gets = {
-                asyncio.create_task(obs.update_queue.get()): obs
-                for obs in self.observers
-            }
-
-            done, _ = await asyncio.wait(
-                gets.keys(), return_when=asyncio.FIRST_COMPLETED
-            )
-
-            for fut in done:
-                upd: Update = fut.result()
-                obs = gets[fut]
-
-                t = asyncio.create_task(self._run_with_gate(obs, upd))
-                self._tasks.add(t)
+        gets = {asyncio.create_task(obs.update_queue.get()): obs for obs in self.observers}
+        try:
+            while gets:
+                done, _ = await asyncio.wait(gets, return_when=asyncio.FIRST_COMPLETED)
+                for fut in done:
+                    obs = gets.pop(fut)
+                    t = asyncio.create_task(self._run_with_gate(obs, fut.result()))
+                    self._tasks.add(t)
+                    gets[asyncio.create_task(obs.update_queue.get())] = obs
+        finally:
+            # A queue getter may have consumed the final event just before
+            # cancellation. Persist it, and cancel only still-pending getters.
+            for fut in gets:
+                if not fut.done():
+                    fut.cancel()
+            await asyncio.gather(*gets, return_exceptions=True)
+            for fut, obs in gets.items():
+                if not fut.cancelled() and fut.exception() is None:
+                    await self._run_with_gate(obs, fut.result())
 
     async def _run_with_gate(self, observer: Observer, update: Update):
         """Wrapper that enforces max_concurrent_updates."""

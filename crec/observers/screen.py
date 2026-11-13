@@ -161,6 +161,10 @@ class Screen(Observer):
 
         # Custom thread pool to prevent exhaustion
         self._thread_pool = ThreadPoolExecutor(max_workers=self._MAX_WORKERS)
+        self._event_tasks: set[asyncio.Task] = set()
+        self._listeners: list = []
+        self._stopping = False
+        self._stopped = False
 
         # Scroll filtering configuration
         self._scroll_debounce_sec = scroll_debounce_sec
@@ -184,6 +188,8 @@ class Screen(Observer):
 
         # scroll activity tracking
         self._scroll_last_time: Optional[float] = None
+        self._scroll_last_input: Optional[float] = None
+        self._scroll_distance: float = 0
         self._scroll_last_position: Optional[tuple[float, float]] = None
         self._scroll_session_start: Optional[float] = None
         self._scroll_event_count: int = 0
@@ -229,37 +235,39 @@ class Screen(Observer):
 
         Returns True if the scroll event should be logged, False otherwise.
         """
-        current_time = time.time()
+        current_time = time.monotonic()
+        magnitude = (dx * dx + dy * dy) ** 0.5
+        if magnitude == 0:
+            return False
 
         # Check if this is a new scroll session
-        if (self._scroll_session_start is None or
-            current_time - self._scroll_session_start > self._scroll_session_timeout):
+        new_session = (self._scroll_last_input is None or
+                       current_time - self._scroll_last_input > self._scroll_session_timeout)
+        self._scroll_last_input = current_time
+        if new_session:
             # Start new session
             self._scroll_session_start = current_time
             self._scroll_event_count = 0
             self._scroll_last_position = (x, y)
             self._scroll_last_time = current_time
+            self._scroll_distance = 0
             return True
 
+        # Trackpad scrolling normally leaves the pointer stationary. Measure
+        # accumulated scroll deltas, not movement of the pointer.
+        self._scroll_distance += magnitude
         # Check debounce time
         if (self._scroll_last_time is not None and
-            current_time - self._scroll_last_time < self._scroll_debounce_sec):
+            current_time - self._scroll_last_time < max(
+                self._scroll_debounce_sec,
+                1 / self._scroll_max_frequency if self._scroll_max_frequency > 0 else 0,
+            )):
             return False
 
-        # Check minimum distance
-        if self._scroll_last_position is not None:
-            distance = ((x - self._scroll_last_position[0]) ** 2 +
-                       (y - self._scroll_last_position[1]) ** 2) ** 0.5
-            if distance < self._scroll_min_distance:
-                return False
-
-        # Check frequency limit
+        if self._scroll_distance < self._scroll_min_distance:
+            return False
         self._scroll_event_count += 1
-        session_duration = current_time - self._scroll_session_start
-        if session_duration > 0:
-            frequency = self._scroll_event_count / session_duration
-            if frequency > self._scroll_max_frequency:
-                return False
+        self._scroll_distance = 0
 
         # Update tracking state
         self._scroll_last_position = (x, y)
@@ -285,15 +293,20 @@ class Screen(Observer):
                 pass  # File might already be deleted
 
     # ─────────────────────────────── I/O helpers
-    async def _save_frame(self, frame, x, y, tag: str, box_color: str = "red", box_width: int = 10) -> str:
+    async def _save_frame(self, frame, x, y, tag: str, box_color: str = "red", box_width: int = 10, *, monitor: dict | None = None) -> str:
         ts   = f"{time.time():.5f}"
         path = os.path.join(self.screens_dir, f"{ts}_{tag}.jpg")
         image = Image.frombytes("RGB", (frame.width, frame.height), frame.rgb)
         draw = ImageDraw.Draw(image)
-        x *= 2
-        y *= 2
-        x1, x2 = max(0, x - 30), min(frame.width, x + 30)
-        y1, y2 = max(0, y - 20), min(frame.height, y + 20)
+        # x/y are monitor-local logical coordinates. Use this image's actual
+        # dimensions: MSS may return nominal-resolution or Retina pixels.
+        if monitor is not None:
+            x *= frame.width / monitor['width']
+            y *= frame.height / monitor['height']
+        x = min(frame.width - 1, max(0, round(x)))
+        y = min(frame.height - 1, max(0, round(y)))
+        x1, x2 = max(0, x - 30), min(frame.width - 1, x + 30)
+        y1, y2 = max(0, y - 20), min(frame.height - 1, y + 20)
         draw.rectangle([x1, y1, x2, y2], outline=box_color, width=box_width)
 
         # Save with lower quality to reduce memory usage
@@ -327,9 +340,51 @@ class Screen(Observer):
             step = f"{action}({ev['text']})"
             await self.update_queue.put(Update(content=step, content_type="input_text"))
 
+    def _start_event(self, callback, *args) -> None:
+        """Called on the event loop; track every listener callback until done."""
+        if self._stopping:
+            return
+        task = asyncio.create_task(callback(*args))
+        self._event_tasks.add(task)
+
+        def finished(done):
+            self._event_tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logging.getLogger('Screen').error(
+                    'An interaction could not be captured (%s). Check recording output.',
+                    type(done.exception()).__name__,
+                )
+        task.add_done_callback(finished)
+
+    async def _finish_key_session(self) -> None:
+        """Caller holds the key lock; leave no background cleanup running."""
+        await self._cleanup_key_screenshots()
+        if len(self._key_screenshots) > 1:
+            last_path = self._key_screenshots[-1]
+            final_path = last_path.replace('_intermediate', '_final')
+            if last_path != final_path:
+                await self._run_in_thread(os.rename, last_path, final_path)
+        self._key_activity_start = None
+        self._key_screenshots = []
+
     async def stop(self) -> None:
-        """Stop the observer and clean up resources."""
-        await super().stop()
+        """Stop input, finish accepted events, then close capture and executor."""
+        if self._stopped:
+            return
+        self._stopping = True
+        for listener in self._listeners:
+            listener.stop()
+        for listener in self._listeners:
+            await asyncio.to_thread(listener.join, 1)
+        # MSS and the executor must stay open for in-flight screenshots.
+        if self._event_tasks:
+            await asyncio.gather(*tuple(self._event_tasks), return_exceptions=True)
+        async with self._key_activity_lock:
+            await self._finish_key_session()
+        self._running = False
+        if self._task:
+            # Let the current grab finish before its MSS context closes.
+            await asyncio.gather(self._task, return_exceptions=True)
 
         # Clean up frame objects
         async with self._frame_lock:
@@ -344,6 +399,7 @@ class Screen(Observer):
         # Shutdown thread pool
         if hasattr(self, '_thread_pool'):
             self._thread_pool.shutdown(wait=True)
+        self._stopped = True
 
     # ─────────────────────────────── skip guard
     def _skip(self) -> bool:
@@ -355,7 +411,9 @@ class Screen(Observer):
         if self.debug:
             logging.basicConfig(level=logging.INFO, format="%(asctime)s [Screen] %(message)s", datefmt="%H:%M:%S")
         else:
-            log.addHandler(logging.NullHandler())
+            if not log.handlers:
+                log.addHandler(logging.StreamHandler())
+            log.setLevel(logging.WARNING)
             log.propagate = False
 
         CAP_FPS  = self._CAPTURE_FPS
@@ -374,13 +432,13 @@ class Screen(Observer):
 
             # ---- mouse callbacks (pynput is sync → schedule into loop) ----
             def schedule_event(x: float, y: float, typ: str):
-                asyncio.run_coroutine_threadsafe(mouse_event(x, y, typ), loop)
+                loop.call_soon_threadsafe(self._start_event, mouse_event, x, y, typ)
 
             def schedule_scroll_event(x: float, y: float, dx: float, dy: float):
-                asyncio.run_coroutine_threadsafe(scroll_event(x, y, dx, dy), loop)
+                loop.call_soon_threadsafe(self._start_event, scroll_event, x, y, dx, dy)
 
             def schedule_key_event(key, typ: str):
-                asyncio.run_coroutine_threadsafe(key_event(key, typ), loop)
+                loop.call_soon_threadsafe(self._start_event, key_event, key, typ)
 
             mouse_listener = mouse.Listener(
                 on_click=lambda x, y, btn, prs: schedule_event(x, y, f"click_{btn.name}") if prs else None,
@@ -389,24 +447,22 @@ class Screen(Observer):
             key_listener = keyboard.Listener(
                 on_press=lambda key: schedule_key_event(key, "press"),
             )
+            self._listeners = [mouse_listener, key_listener]
             mouse_listener.start()
             key_listener.start()
 
             # ---- nested helper inside the async context ----
-            async def flush():
-                if self._pending_event is None:
-                    return
+            async def flush(ev):
                 if self._skip():
-                    self._pending_event = None
                     return
 
-                ev = self._pending_event
+                # Let the application apply the interaction before its after
+                # screenshot. Each callback owns its own before/event pair.
+                await asyncio.sleep(0.15)
                 try:
                     aft = await self._run_in_thread(sct.grab, mons[ev["mon"] - 1])
                 except Exception as e:
-                    if self.debug:
-                        logging.getLogger("Screen").error(f"Failed to capture after frame: {e}")
-                    self._pending_event = None
+                    log.error('Failed to capture an after screenshot (%s). Check Screen Recording permission.', type(e).__name__)
                     return
 
                 if "scroll" in ev["type"]:
@@ -415,12 +471,12 @@ class Screen(Observer):
                 else:
                     step = f"{ev['type']}({ev['position'][0]:.1f}, {ev['position'][1]:.1f})"
 
-                bef_path = await self._save_frame(ev["before"], ev["position"][0], ev["position"][1], f"{step}_before")
-                aft_path = await self._save_frame(aft, ev["position"][0], ev["position"][1], f"{step}_after")
+                monitor = mons[ev['mon'] - 1]
+                bef_path = await self._save_frame(ev["before"], ev["position"][0], ev["position"][1], f"{step}_before", monitor=monitor)
+                aft_path = await self._save_frame(aft, ev["position"][0], ev["position"][1], f"{step}_after", monitor=monitor)
                 await self._process_and_emit(bef_path, aft_path, ev["type"], ev)
 
                 log.info(f"{ev['type']} captured on monitor {ev['mon']}")
-                self._pending_event = None
 
             # def debounce_flush():
             #     # callback from loop.call_later → must create task
@@ -444,6 +500,12 @@ class Screen(Observer):
                     Update(content=step, content_type="input_text")
                 )
 
+                async with self._frame_lock:
+                    frame = self._frames.get(idx)
+                if frame is None:
+                    log.warning('No screenshot available for keyboard event. Check Screen Recording permission.')
+                    return
+
                 async with self._key_activity_lock:
                     current_time = time.time()
 
@@ -451,23 +513,24 @@ class Screen(Observer):
                     if (self._key_activity_start is None or
                         current_time - self._key_activity_start > self._key_activity_timeout):
                         # Start new session - save first screenshot
-                        self._key_activity_start = current_time
-                        self._key_screenshots = []
-                        screenshot_path = await self._save_frame(self._frames[idx], x, y, f"{step}_first")
+                        await self._finish_key_session()
+                        screenshot_path = await self._save_frame(frame, x, y, f"{step}_first", monitor=mon)
                         self._key_screenshots.append(screenshot_path)
                         log.info(f"Started new keyboard session, saved first screenshot: {screenshot_path}")
                     else:
                         # Continue existing session - save intermediate screenshot
-                        screenshot_path = await self._save_frame(self._frames[idx], x, y, f"{step}_intermediate")
+                        screenshot_path = await self._save_frame(frame, x, y, f"{step}_intermediate", monitor=mon)
                         self._key_screenshots.append(screenshot_path)
                         log.info(f"Continued keyboard session, saved intermediate screenshot: {screenshot_path}")
 
-                    # Schedule cleanup of previous intermediate screenshots
-                    if len(self._key_screenshots) > 2:
-                        asyncio.create_task(self._cleanup_key_screenshots())
+                    self._key_activity_start = current_time
+                    await self._cleanup_key_screenshots()
 
             # ---- scroll event reception ----
             async def scroll_event(x: float, y: float, dx: float, dy: float):
+                idx = self._mon_for(x, y, mons)
+                if idx is None or self._skip():
+                    return
                 # Apply scroll filtering
                 async with self._scroll_lock:
                     if not self._should_log_scroll(x, y, dx, dy):
@@ -475,20 +538,9 @@ class Screen(Observer):
                             log.info(f"Scroll filtered out: dx={dx:.2f}, dy={dy:.2f}")
                         return
 
-                idx = self._mon_for(x, y, mons)
-                if idx is None:
-                    return
-
                 mon = mons[idx - self._MON_START]
                 x = x - mon["left"]
                 y = y - mon["top"]
-
-                # Only log significant scroll movements
-                scroll_magnitude = (dx**2 + dy**2)**0.5
-                if scroll_magnitude < 1.0:  # Very small scrolls
-                    if self.debug:
-                        log.info(f"Scroll too small: magnitude={scroll_magnitude:.2f}")
-                    return
 
                 log.info(f"Scroll @({x:7.1f},{y:7.1f}) dx={dx:.2f} dy={dy:.2f} → mon={idx}")
 
@@ -496,17 +548,19 @@ class Screen(Observer):
                     return
 
                 async with self._frame_lock:
-                    bf = self._frames[idx]
+                    bf = self._frames.get(idx)
                     if bf is None:
                         return
-                    self._pending_event = {"type": "scroll", "position": (x, y), "mon": idx, "before": bf, "scroll": (dx, dy)}
+                    ev = {"type": "scroll", "position": (x, y), "mon": idx, "before": bf, "scroll": (dx, dy)}
 
                 # Process event immediately
-                await flush()
+                await flush(ev)
 
             # ---- mouse event reception ----
             async def mouse_event(x: float, y: float, typ: str):
                 idx = self._mon_for(x, y, mons)
+                if idx is None or self._skip():
+                    return
                 mon = mons[idx - self._MON_START]
                 x = x - mon["left"]
                 y = y - mon["top"]
@@ -517,13 +571,13 @@ class Screen(Observer):
                     return
 
                 async with self._frame_lock:
-                    bf = self._frames[idx]
+                    bf = self._frames.get(idx)
                     if bf is None:
                         return
-                    self._pending_event = {"type": typ, "position": (x, y), "mon": idx, "before": bf}
+                    ev = {"type": typ, "position": (x, y), "mon": idx, "before": bf}
 
                 # Process event immediately instead of using debounce
-                await flush()
+                await flush(ev)
 
             # ---- main capture loop ----
             log.info(f"Screen observer started — guarding {self._guard or '∅'}")
@@ -543,8 +597,9 @@ class Screen(Observer):
                     try:
                         frame = await self._run_in_thread(sct.grab, m)
                     except Exception as e:
-                        if self.debug:
-                            logging.getLogger("Screen").error(f"Failed to capture frame: {e}")
+                        if not getattr(self, '_capture_warning_shown', False):
+                            log.error('Screen capture failed (%s). Check Screen Recording permission and restart the terminal.', type(e).__name__)
+                            self._capture_warning_shown = True
                         continue
 
                     async with self._frame_lock:
@@ -564,20 +619,12 @@ class Screen(Observer):
                 current_time = time.time()
                 if (self._key_activity_start is not None and
                     current_time - self._key_activity_start > self._key_activity_timeout and
-                    len(self._key_screenshots) > 1):
+                    self._key_screenshots):
                     # Session ended - rename last screenshot to indicate it's the final one
                     async with self._key_activity_lock:
-                        if len(self._key_screenshots) > 1:
-                            last_path = self._key_screenshots[-1]
-                            final_path = last_path.replace("_intermediate", "_final")
-                            try:
-                                await self._run_in_thread(os.rename, last_path, final_path)
-                                self._key_screenshots[-1] = final_path
-                                log.info(f"Keyboard session ended, renamed final screenshot: {final_path}")
-                            except OSError:
-                                pass
-                        self._key_activity_start = None
-                        self._key_screenshots = []
+                        if (self._key_activity_start is not None and
+                            time.time() - self._key_activity_start > self._key_activity_timeout):
+                            await self._finish_key_session()
 
                 # fps throttle
                 dt = time.time() - t0
@@ -590,14 +637,7 @@ class Screen(Observer):
             # Final cleanup of any remaining keyboard session
             if self._key_activity_start is not None and len(self._key_screenshots) > 1:
                 async with self._key_activity_lock:
-                    last_path = self._key_screenshots[-1]
-                    final_path = last_path.replace("_intermediate", "_final")
-                    try:
-                        await self._run_in_thread(os.rename, last_path, final_path)
-                        log.info(f"Final keyboard session cleanup, renamed: {final_path}")
-                    except OSError:
-                        pass
-                    await self._cleanup_key_screenshots()
+                    await self._finish_key_session()
 
             # if self._debounce_handle:
             #     self._debounce_handle.cancel()

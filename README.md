@@ -62,8 +62,12 @@ The files are saved to:
 └── screenshots/     # JPEG screenshots around interactions
 ```
 
-Do a short trial before the study: click and type in a test window, stop recording,
-and check that `screenshots/` contains readable images and `actions.db` exists.
+Do a short trial before the study: click recognizable targets near different
+corners of a test window, type synthetic text, and scroll several times without
+moving the pointer. Stop recording, then check that `screenshots/` contains
+readable images and `actions.db` exists. In `click_left(...)` images, the red box
+should surround the clicked spot. In `key_press(...)` images it marks the mouse
+position, not the text caret. Scrolling is sampled; this is not continuous video.
 Move or rename the trial's `records` folder before starting the actual study.
 Each run uses the same output folder, so also move or rename earlier recordings
 before starting another session.
@@ -97,9 +101,11 @@ crec --scroll-debounce 0.5 \
      --scroll-session-timeout 2.0
 ```
 
-These are the defaults. They control the minimum time between scroll events,
-minimum pointer movement between logged scrolls, maximum event frequency, and
-scroll session timeout. Use the defaults unless the study team instructs otherwise.
+These are the defaults. They control the minimum time between sampled scroll
+events, accumulated scroll distance in input-event units (not pointer movement),
+maximum event frequency, and inactivity before a new scroll session. The first
+nonzero scroll of a new session is captured even if small. Use the defaults
+unless the study team instructs otherwise.
 
 ## Attribution and license
 

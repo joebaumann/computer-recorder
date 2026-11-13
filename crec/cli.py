@@ -13,7 +13,7 @@ def parse_args():
     parser.add_argument('--scroll-debounce', type=float, default=0.5,
                        help='Minimum time between scroll events (seconds, default: 0.5)')
     parser.add_argument('--scroll-min-distance', type=float, default=5.0,
-                       help='Minimum scroll distance to log (pixels, default: 5.0)')
+                       help='Accumulated scroll distance between samples (input-event units, default: 5.0)')
     parser.add_argument('--scroll-max-frequency', type=int, default=10,
                        help='Maximum scroll events per second (default: 10)')
     parser.add_argument('--scroll-session-timeout', type=float, default=2.0,
